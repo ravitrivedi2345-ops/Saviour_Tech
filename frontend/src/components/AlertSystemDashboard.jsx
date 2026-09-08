@@ -12,6 +12,7 @@ import {
   getQueueStatus,
   createAlertsWebSocket,
   simulate,
+  getCameras,
 } from '../api';
 
 const ALERT_TYPE_META = {
@@ -37,9 +38,11 @@ const STATUS_META = {
   DISMISSED: { label: 'Dismissed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', border: '#475569' },
 };
 
-export default function AlertSystemDashboard({ onNavigateToTrajectory, onNavigateToIdentity }) {
+export default function AlertSystemDashboard({ onNavigateToTrajectory, onNavigateToIdentity, onInspect, initialTab = 'alerts' }) {
   // ─── State ──────────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState('alerts'); // 'alerts' | 'blacklist' | 'config'
+  const [activeTab, setActiveTab] = useState(initialTab); // 'alerts' | 'cameras' | 'blacklist' | 'config'
+  const [cameras, setCameras] = useState(null);
+  const [selectedCam, setSelectedCam] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [totalAlerts, setTotalAlerts] = useState(0);
   const [stats, setStats] = useState(null);
@@ -181,9 +184,21 @@ export default function AlertSystemDashboard({ onNavigateToTrajectory, onNavigat
     }
   };
 
+  const fetchCameras = async () => {
+    try {
+      const res = await getCameras();
+      setCameras(res.cameras);
+    } catch (err) {
+      console.warn('Failed to load cameras in AlertSystemDashboard', err);
+    }
+  };
+
   useEffect(() => {
     fetchAlerts();
     fetchStats();
+    fetchBlacklist();
+    fetchConfigs();
+    fetchCameras();
   }, [statusFilter, typeFilter, priorityFilter, searchPlate, currentPage]);
 
   useEffect(() => {
@@ -418,6 +433,12 @@ export default function AlertSystemDashboard({ onNavigateToTrajectory, onNavigat
           onClick={() => setActiveTab('alerts')}
         >
           🚨 Real-Time Alert Feed ({totalAlerts})
+        </button>
+        <button
+          className={`acc-tab-btn ${activeTab === 'cameras' ? 'active' : ''}`}
+          onClick={() => setActiveTab('cameras')}
+        >
+          📡 Delhi Camera Network ({cameras ? Object.keys(cameras).length : 9} Nodes)
         </button>
         <button
           className={`acc-tab-btn ${activeTab === 'blacklist' ? 'active' : ''}`}
@@ -973,6 +994,106 @@ export default function AlertSystemDashboard({ onNavigateToTrajectory, onNavigat
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ──────────────────────────────────────────────────────────────────────
+          TAB 4: DELHI CAMERA SENSOR TOPOLOGY (MERGED)
+         ────────────────────────────────────────────────────────────────────── */}
+      {activeTab === 'cameras' && (
+        <div className="cameras-tab-content">
+          <div className="card-header" style={{ padding: '0 0 14px 0', borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: 16 }}>
+            <div className="card-header-left">
+              <span className="dev-tag">SENSOR TOPOLOGY &amp; NCR HARDWARE TELEMETRY</span>
+              <h3 style={{ margin: '4px 0 0 0', color: '#fff' }}>
+                Delhi NCR Multi-Camera Sensor Infrastructure ({cameras ? Object.keys(cameras).length : 9} Stations)
+              </h3>
+            </div>
+            {onInspect && cameras && (
+              <button 
+                className="btn-dev-sm" 
+                onClick={() => onInspect({ title: 'Camera Network Matrix JSON', data: cameras })}
+              >
+                Matrix JSON
+              </button>
+            )}
+          </div>
+
+          <p className="student-helper-text" style={{ marginBottom: 16 }}>
+            💡 <strong>Sensor Network Context:</strong> These smart ANPR cameras continuously stream telemetry and trigger instant alerts for blacklist violations, loitering, wrong-way movement, and speed physics anomalies across Delhi NCR. Click any camera card to highlight it.
+          </p>
+
+          <div className="topology-grid">
+            <div className="topology-table-wrap">
+              <table className="data-table dev-grid">
+                <thead>
+                  <tr>
+                    <th>CAMERA ID</th>
+                    <th>INTERSECTION / LANDMARK</th>
+                    <th>NCR REGION</th>
+                    <th>GPS COORDINATES</th>
+                    <th>TELEMETRY</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(cameras || {}).map(([id, cam]) => (
+                    <tr 
+                      key={id} 
+                      className={`dev-row ${selectedCam === id ? 'row-selected' : ''}`}
+                      onClick={() => setSelectedCam(id)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <td className="mono bold highlight-cyan">{id}</td>
+                      <td><strong>{cam.name ? cam.name.split('—')[0].trim() : id}</strong></td>
+                      <td>
+                        <span className="zone-tag">{cam.zone || 'Delhi Arterial'}</span>
+                      </td>
+                      <td className="mono text-muted" style={{ fontSize: 11 }}>
+                        {cam.lat ? cam.lat.toFixed(4) : '28.6139'}°N, {cam.lon ? cam.lon.toFixed(4) : '77.2090'}°E
+                      </td>
+                      <td>
+                        <button 
+                          className="btn-dev-xs"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onInspect) onInspect({ title: `Node Telemetry: ${id}`, data: { id, ...cam } });
+                          }}
+                        >
+                          Inspect
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="topology-schematic">
+              <div className="schematic-header">
+                <span className="bold">NCR SENSOR SCHEMATIC MAP</span>
+                <span className="schematic-status">● {cameras ? Object.keys(cameras).length : 9} SENSORS OPERATIONAL</span>
+              </div>
+              <div className="schematic-nodes">
+                {Object.entries(cameras || {}).map(([id, cam]) => (
+                  <div 
+                    key={id} 
+                    className={`schematic-node-card ${selectedCam === id ? 'node-active' : ''}`}
+                    onClick={() => setSelectedCam(id)}
+                  >
+                    <div className="node-id-bar">
+                      <span className="mono bold">{id}</span>
+                      <span className="node-status-dot" />
+                    </div>
+                    <div className="node-name">{cam.name ? cam.name.split('—')[0].trim() : id}</div>
+                    <div className="node-zone">{cam.zone || 'Delhi NCR'}</div>
+                    <div className="node-coords">
+                      {cam.lat ? cam.lat.toFixed(4) : '28.6139'}°N, {cam.lon ? cam.lon.toFixed(4) : '77.2090'}°E
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

@@ -7,35 +7,39 @@ export default function TrajectoryMap({
   segments = [],
   activeWaypointId = null,
   onSelectWaypoint = () => {},
+  showLiveHeatmap = false,
+  heatmapData = [],
+  showLiveCameras = false,
+  cameraNodes = [],
+  onSelectPlate = () => {},
 }) {
   const mapContainerRef = useRef(null);
   const mapInstanceRef = useRef(null);
-  const layerGroupRef = useRef(null);
+  const trajectoryLayerRef = useRef(null);
+  const heatmapLayerRef = useRef(null);
+  const cameraLayerRef = useRef(null);
   const markersMapRef = useRef(new Map());
 
-  // Initialize map once
+  // Initialize Leaflet map instance
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    // Default center on Delhi NCR
     const map = L.map(mapContainerRef.current, {
       center: [28.6139, 77.2090],
       zoom: 11,
       zoomControl: true,
     });
 
-    // CartoDB Voyager sleek map tiles with clear road labels
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-      subdomains: 'abcd',
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
     }).addTo(map);
 
-    const layerGroup = L.layerGroup().addTo(map);
-    mapInstanceRef.current = map;
-    layerGroupRef.current = layerGroup;
+    heatmapLayerRef.current = L.layerGroup().addTo(map);
+    cameraLayerRef.current = L.layerGroup().addTo(map);
+    trajectoryLayerRef.current = L.layerGroup().addTo(map);
 
-    // Invalidate size to ensure tiles fill container
+    mapInstanceRef.current = map;
     setTimeout(() => map.invalidateSize(), 200);
 
     return () => {
@@ -44,38 +48,107 @@ export default function TrajectoryMap({
     };
   }, []);
 
-  // Update markers and polyline segments when waypoints or segments change
+  // ── Render Heatmap Circles ──
   useEffect(() => {
-    const map = mapInstanceRef.current;
-    const layerGroup = layerGroupRef.current;
-    if (!map || !layerGroup) return;
+    const heatLayer = heatmapLayerRef.current;
+    if (!heatLayer) return;
+    heatLayer.clearLayers();
 
-    layerGroup.clearLayers();
+    if (!showLiveHeatmap || !heatmapData || heatmapData.length === 0) return;
+
+    heatmapData.forEach((point) => {
+      const lat = point.lat;
+      const lng = point.lng || point.lon;
+      if (!lat || !lng) return;
+
+      const intensity = point.intensity ?? point.congestion_score ?? 0.35;
+      const radius = 300 + intensity * 900;
+      const color = intensity > 0.65 ? '#ef4444' : intensity > 0.4 ? '#f59e0b' : '#10b981';
+
+      const circle = L.circle([lat, lng], {
+        radius,
+        stroke: false,
+        fillColor: color,
+        fillOpacity: 0.22,
+      });
+
+      circle.bindTooltip(
+        `<div style="font-size:11px;">` +
+        `<strong>${point.camera_id || 'Node'} - Congestion</strong><br/>` +
+        `Level: <strong>${point.congestion_level || (intensity > 0.6 ? 'Heavy' : intensity > 0.3 ? 'Moderate' : 'Smooth')}</strong> (${Math.round(intensity * 100)}%)<br/>` +
+        `Avg Speed: ${point.avg_speed_kmh || '48.0'} km/h` +
+        `</div>`,
+        { sticky: true }
+      );
+
+      heatLayer.addLayer(circle);
+    });
+  }, [showLiveHeatmap, heatmapData]);
+
+  // ── Render Live Camera Nodes ──
+  useEffect(() => {
+    const camLayer = cameraLayerRef.current;
+    if (!camLayer) return;
+    camLayer.clearLayers();
+
+    if (!showLiveCameras || !cameraNodes || cameraNodes.length === 0) return;
+
+    cameraNodes.forEach((cam) => {
+      const lat = cam.lat;
+      const lng = cam.lng || cam.lon;
+      if (!lat || !lng) return;
+
+      const marker = L.circleMarker([lat, lng], {
+        radius: 7,
+        weight: 2,
+        color: '#00f0ff',
+        fillColor: '#0b111d',
+        fillOpacity: 0.9,
+      });
+
+      marker.bindPopup(
+        `<div class="map-popup-card">` +
+        `<div class="popup-title"><strong>${cam.name || cam.camera_id}</strong></div>` +
+        `<div class="popup-sub mono text-muted">ID: ${cam.camera_id} · Corridor: ${cam.corridor || 'Delhi Arterial'}</div>` +
+        `<div style="margin-top:6px;font-size:11px;color:#38bdf8;">● Live Stream Active</div>` +
+        `</div>`
+      );
+
+      camLayer.addLayer(marker);
+    });
+  }, [showLiveCameras, cameraNodes]);
+
+  // ── Render Trajectory Segments & Waypoints ──
+  useEffect(() => {
+    const trajLayer = trajectoryLayerRef.current;
+    const map = mapInstanceRef.current;
+    if (!trajLayer || !map) return;
+
+    trajLayer.clearLayers();
     markersMapRef.current.clear();
 
     if (!waypoints || waypoints.length === 0) return;
 
     const latLngs = [];
 
-    // 1. Draw Path Segments (Solid for continuous, Dashed for gaps)
+    // 1. Draw Road Segments (Solid = observed, Dashed = gaps)
     if (segments && segments.length > 0) {
-      segments.forEach((seg, idx) => {
+      segments.forEach((seg) => {
         if (seg.type === 'continuous' && seg.coordinates && seg.coordinates.length > 1) {
           const polyline = L.polyline(seg.coordinates, {
-            color: '#0284c7', // vibrant cyan/blue
-            weight: 4,
-            opacity: 0.9,
+            color: '#00f0ff',
+            weight: 4.5,
+            opacity: 0.95,
             lineJoin: 'round',
           });
           polyline.bindTooltip(
-            `<strong>Observed Route Segment</strong><br/>${seg.stops ? seg.stops.length : 0} consecutive sightings`,
+            `<strong>Observed Route Segment (OSM Road Snapped)</strong><br/>${seg.stops ? seg.stops.length : 0} consecutive sightings`,
             { sticky: true }
           );
-          layerGroup.addLayer(polyline);
+          trajLayer.addLayer(polyline);
         } else if (seg.type === 'gap' && seg.coordinates && seg.coordinates.length === 2) {
-          // Explicit Coverage Gap: Dashed line indicating lack of camera sightings
           const gapLine = L.polyline(seg.coordinates, {
-            color: '#d97706', // amber/orange
+            color: '#f59e0b',
             weight: 3.5,
             dashArray: '8, 8',
             opacity: 0.85,
@@ -88,18 +161,17 @@ export default function TrajectoryMap({
             `<em style="color:#b45309;">${seg.reason || 'Unmonitored road segment'}</em></div>`,
             { sticky: true }
           );
-          layerGroup.addLayer(gapLine);
+          trajLayer.addLayer(gapLine);
         }
       });
     } else if (waypoints.length > 1) {
-      // Fallback: connect consecutive points if segments not passed
       const pts = waypoints.map(w => [w.lat, w.lon]);
       const polyline = L.polyline(pts, {
-        color: '#0284c7',
+        color: '#00f0ff',
         weight: 4,
         opacity: 0.9,
       });
-      layerGroup.addLayer(polyline);
+      trajLayer.addLayer(polyline);
     }
 
     // 2. Draw Numbered Waypoint Markers
@@ -109,7 +181,6 @@ export default function TrajectoryMap({
       const isGap = wp.is_gap;
       latLngs.push([wp.lat, wp.lon]);
 
-      // Determine badge color
       let badgeClass = 'traj-map-pin';
       if (isFirst) badgeClass += ' pin-first';
       else if (isLast) badgeClass += ' pin-last';
@@ -131,7 +202,6 @@ export default function TrajectoryMap({
 
       const marker = L.marker([wp.lat, wp.lon], { icon: customIcon });
 
-      // Build Rich Interactive Popup
       const popupHtml = `
         <div class="map-popup-card">
           <div class="popup-title">
@@ -141,12 +211,12 @@ export default function TrajectoryMap({
           <div class="popup-sub mono text-muted">ID: ${wp.camera_id} &bull; ${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)}</div>
           
           <div class="popup-row">
-            <span>🕒 Timestamp:</span>
+            <span>🕒 Sighting:</span>
             <strong>${fmtDateTime(wp.timestamp)}</strong>
           </div>
 
           <div class="popup-row">
-            <span>🎯 OCR Confidence:</span>
+            <span>🎯 Confidence:</span>
             <span class="conf-badge-sm">${(wp.confidence * 100).toFixed(1)}%</span>
           </div>
 
@@ -163,7 +233,7 @@ export default function TrajectoryMap({
 
           ${wp.burst_count > 1 ? `
             <div class="popup-badge-burst">
-              📸 ${wp.burst_count} raw video frames collapsed (Deduplicated)
+              📸 ${wp.burst_count} raw frames collapsed (Burst deduplicated)
             </div>
           ` : ''}
 
@@ -180,11 +250,10 @@ export default function TrajectoryMap({
         onSelectWaypoint(wp);
       });
 
-      layerGroup.addLayer(marker);
+      trajLayer.addLayer(marker);
       markersMapRef.current.set(wp.id || `wp_${index}`, marker);
     });
 
-    // 3. Fit bounds to all waypoints
     if (latLngs.length > 0) {
       try {
         const bounds = L.latLngBounds(latLngs);
@@ -195,7 +264,7 @@ export default function TrajectoryMap({
     }
   }, [waypoints, segments]);
 
-  // Center on active waypoint if user clicks from timeline
+  // Center on active waypoint
   useEffect(() => {
     if (!activeWaypointId || !mapInstanceRef.current) return;
     const marker = markersMapRef.current.get(activeWaypointId);
@@ -212,11 +281,11 @@ export default function TrajectoryMap({
       <div className="map-legend-bar">
         <div className="legend-item">
           <span className="legend-line solid-line" />
-          <span>Observed Transit (Continuous Tracking)</span>
+          <span>Observed Transit (OSM Delhi Road)</span>
         </div>
         <div className="legend-item">
           <span className="legend-line dashed-line" />
-          <span>Coverage Gap / Unobserved Transit (&gt;30 min or blindspot)</span>
+          <span>Coverage Gap (&gt;80km/h or blindspot)</span>
         </div>
         <div className="legend-item">
           <span className="legend-dot dot-departure" />
@@ -226,6 +295,12 @@ export default function TrajectoryMap({
           <span className="legend-dot dot-arrival" />
           <span>Latest Sighting</span>
         </div>
+        {showLiveHeatmap && (
+          <div className="legend-item">
+            <span className="legend-dot" style={{ background: '#ef4444' }} />
+            <span>Heavy Congestion</span>
+          </div>
+        )}
       </div>
     </div>
   );

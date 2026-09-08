@@ -1,138 +1,384 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-const ROLE_COLORS = {
-  Admin: { bg: 'rgba(239, 68, 68, 0.15)', border: '#ef4444', text: '#fca5a5' },
-  'Traffic Police': { bg: 'rgba(59, 130, 246, 0.15)', border: '#3b82f6', text: '#93c5fd' },
-  'City Planner': { bg: 'rgba(16, 185, 129, 0.15)', border: '#10b981', text: '#6ee7b7' },
-};
+const ROLE_PRESETS = [
+  {
+    role: 'Admin',
+    label: 'System Admin',
+    username: 'admin',
+    password: 'Admin@123',
+    icon: '👑',
+    department: 'Central Command & System Ops',
+    badgeColor: '#ef4444',
+    badgeBg: 'rgba(239, 68, 68, 0.12)',
+    badgeBorder: 'rgba(239, 68, 68, 0.35)',
+    description: 'Full system control, blacklist CRUD, audit logs & analytics.',
+  },
+  {
+    role: 'Traffic Police',
+    label: 'Traffic Police Inspector',
+    username: 'police_sharma',
+    password: 'Police@123',
+    icon: '👮‍♂️',
+    department: 'South District Enforcement Cell',
+    badgeColor: '#3b82f6',
+    badgeBg: 'rgba(59, 130, 246, 0.12)',
+    badgeBorder: 'rgba(59, 130, 246, 0.35)',
+    description: 'Trajectory tracking, private citizen owner vault, alerts & video ANPR.',
+  },
+  {
+    role: 'City Planner',
+    label: 'Urban Mobility Planner',
+    username: 'planner_verma',
+    password: 'Planner@123',
+    icon: '📊',
+    department: 'Urban Mobility & Transit Bureau',
+    badgeColor: '#10b981',
+    badgeBg: 'rgba(16, 185, 129, 0.12)',
+    badgeBorder: 'rgba(16, 185, 129, 0.35)',
+    description: 'City traffic analytics, congestion heatmaps & corridor speed analysis.',
+  },
+];
 
 export default function AuthModal({ onClose, required = false }) {
-  const { login, loading, demoAccounts } = useAuth();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const { login, loading } = useAuth();
+  const [username, setUsername] = useState('police_sharma');
+  const [password, setPassword] = useState('Police@123');
+  const [showPassword, setShowPassword] = useState(false);
+  const [selectedPreset, setSelectedPreset] = useState('police_sharma');
   const [error, setError] = useState('');
+  const [activeView, setActiveView] = useState('login'); // 'login' | 'matrix'
+
+  // Auto-focus & escape handling
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && !required && onClose) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [required, onClose]);
+
+  const handleSelectPreset = (preset, autoSubmit = false) => {
+    setSelectedPreset(preset.username);
+    setUsername(preset.username);
+    setPassword(preset.password);
+    setError('');
+    if (autoSubmit) {
+      handleDirectLogin(preset.username, preset.password);
+    }
+  };
+
+  const handleDirectLogin = async (userVal, passVal) => {
+    setError('');
+    try {
+      await login(userVal.trim(), passVal);
+      if (onClose) onClose();
+    } catch (err) {
+      setError(err.message || 'Authentication failed. Please check credentials.');
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError('');
-    try {
-      await login(username.trim(), password);
-      if (onClose) onClose();
-    } catch (err) {
-      setError(err.message || 'Login failed');
+    if (!username.trim() || !password) {
+      setError('Please enter both username and password.');
+      return;
     }
-  };
-
-  const handleDemoLogin = async (account) => {
-    setUsername(account.username);
-    setPassword(account.password);
-    setError('');
-    try {
-      await login(account.username, account.password);
-      if (onClose) onClose();
-    } catch (err) {
-      setError(err.message || 'Login failed');
-    }
+    handleDirectLogin(username, password);
   };
 
   return (
-    <div className="modal-backdrop" onClick={required ? undefined : onClose}>
-      <div className="modal-content auth-modal" onClick={e => e.stopPropagation()}>
-        <div className="modal-header auth-modal-header">
-          <div className="modal-title-wrap">
-            <span className="auth-lock-icon">🔐</span>
+    <div className="auth-overlay-backdrop" onClick={required ? undefined : onClose}>
+      <div className="auth-modal-card" onClick={e => e.stopPropagation()}>
+        {/* Glowing ambient background flare */}
+        <div className="auth-modal-glow" />
+
+        {/* ── Header ── */}
+        <div className="auth-header-bar">
+          <div className="auth-brand-badge">
+            <div className="auth-shield-icon">🛡️</div>
             <div>
-              <div className="modal-title">Secure Access — Delhi ANPR Platform</div>
-              <div className="auth-subtitle">JWT authentication with role-based access control</div>
+              <div className="auth-platform-tag">
+                <span className="auth-dot-pulse" />
+                DELHI TRAFFIC POLICE · SECURE AI GATEWAY
+              </div>
+              <h2 className="auth-modal-heading">Platform Authentication</h2>
             </div>
           </div>
           {!required && (
-            <button className="btn-dev btn-close" onClick={onClose}>Close [X]</button>
+            <button 
+              type="button" 
+              className="auth-close-btn" 
+              onClick={onClose} 
+              aria-label="Close modal"
+              title="Close (Esc)"
+            >
+              ✕
+            </button>
           )}
         </div>
 
-        <div className="modal-body">
-          <div className="auth-info-banner">
-            All login events and plate searches are permanently recorded in the audit log for statutory compliance.
-          </div>
-
-          <form className="auth-form" onSubmit={handleSubmit}>
-            <div className="auth-field">
-              <label>USERNAME</label>
-              <input
-                type="text"
-                value={username}
-                onChange={e => setUsername(e.target.value)}
-                placeholder="e.g. police_sharma"
-                autoComplete="username"
-                required
-              />
-            </div>
-            <div className="auth-field">
-              <label>PASSWORD</label>
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Enter password"
-                autoComplete="current-password"
-                required
-              />
-            </div>
-
-            {error && <div className="auth-error">{error}</div>}
-
-            <button type="submit" className="btn btn-primary auth-submit-btn" disabled={loading}>
-              {loading ? 'Authenticating...' : 'Sign In'}
-            </button>
-          </form>
-
-          <div className="auth-demo-section">
-            <div className="auth-demo-title">One-Click Demo Credentials</div>
-            <div className="auth-demo-grid">
-              {demoAccounts.map(account => {
-                const colors = ROLE_COLORS[account.role] || ROLE_COLORS.Admin;
-                return (
-                  <button
-                    key={account.username}
-                    type="button"
-                    className="auth-demo-card"
-                    style={{ background: colors.bg, borderColor: colors.border }}
-                    onClick={() => handleDemoLogin(account)}
-                    disabled={loading}
-                  >
-                    <span className="auth-demo-role" style={{ color: colors.text }}>{account.label}</span>
-                    <span className="auth-demo-user mono">{account.username}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="auth-role-matrix">
-            <div className="auth-matrix-title">Access Matrix</div>
-            <table className="auth-matrix-table">
-              <thead>
-                <tr>
-                  <th>Feature</th>
-                  <th>Admin</th>
-                  <th>Traffic Police</th>
-                  <th>City Planner</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td>Trajectory & Plate Search</td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Owner Identity Vault</td><td>✓</td><td>✓</td><td>✗</td></tr>
-                <tr><td>Alert Disposition</td><td>✓</td><td>✓</td><td>✗</td></tr>
-                <tr><td>Video ANPR Upload</td><td>✓</td><td>✓</td><td>✗</td></tr>
-                <tr><td>Live Traffic Map</td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>City Analytics</td><td>✓</td><td>✓</td><td>✓</td></tr>
-                <tr><td>Audit Logs</td><td>✓</td><td>✗</td><td>✗</td></tr>
-              </tbody>
-            </table>
-          </div>
+        {/* ── Subtitle / Mode Tabs ── */}
+        <div className="auth-nav-tabs">
+          <button 
+            type="button"
+            className={`auth-nav-tab ${activeView === 'login' ? 'active' : ''}`}
+            onClick={() => setActiveView('login')}
+          >
+            🔑 Sign In Portal
+          </button>
+          <button 
+            type="button"
+            className={`auth-nav-tab ${activeView === 'matrix' ? 'active' : ''}`}
+            onClick={() => setActiveView('matrix')}
+          >
+            📋 Role & Permissions Matrix
+          </button>
         </div>
+
+        {activeView === 'login' ? (
+          <div className="auth-body-content">
+            {/* ── 1-Click Quick Select Demo Cards ── */}
+            <div className="auth-preset-section">
+              <div className="auth-section-label">
+                <span>⚡ 1-Click Quick Demo Sign In</span>
+                <span className="auth-section-sub">Select a role to auto-fill credentials</span>
+              </div>
+              <div className="auth-preset-grid">
+                {ROLE_PRESETS.map((preset) => {
+                  const isSelected = selectedPreset === preset.username;
+                  return (
+                    <div
+                      key={preset.username}
+                      className={`auth-preset-card ${isSelected ? 'selected' : ''}`}
+                      style={{
+                        '--preset-color': preset.badgeColor,
+                        '--preset-bg': preset.badgeBg,
+                        '--preset-border': preset.badgeBorder,
+                      }}
+                      onClick={() => handleSelectPreset(preset, false)}
+                    >
+                      <div className="auth-preset-top">
+                        <span className="auth-preset-icon">{preset.icon}</span>
+                        <span className="auth-role-pill">{preset.role}</span>
+                      </div>
+                      <div className="auth-preset-name">{preset.label}</div>
+                      <div className="auth-preset-dept">{preset.department}</div>
+                      
+                      <div className="auth-preset-footer">
+                        <span className="auth-creds-preview mono">{preset.username}</span>
+                        <button
+                          type="button"
+                          className="auth-quick-login-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectPreset(preset, true);
+                          }}
+                          disabled={loading}
+                          title={`Log in instantly as ${preset.role}`}
+                        >
+                          Sign In →
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ── Form Section ── */}
+            <form className="auth-form-wrapper" onSubmit={handleSubmit}>
+              <div className="auth-form-header-line">
+                <span>Or Enter Credentials Manually</span>
+              </div>
+
+              {error && (
+                <div className="auth-alert-box error" role="alert">
+                  <span className="auth-alert-icon">⚠️</span>
+                  <div className="auth-alert-msg">{error}</div>
+                </div>
+              )}
+
+              <div className="auth-input-group">
+                <label className="auth-field-label" htmlFor="auth-username">
+                  <span>Username</span>
+                  <span className="auth-field-hint">e.g. police_sharma, admin, planner_verma</span>
+                </label>
+                <div className="auth-input-container">
+                  <span className="auth-input-icon">👤</span>
+                  <input
+                    id="auth-username"
+                    type="text"
+                    className="auth-text-input"
+                    value={username}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      setSelectedPreset('');
+                    }}
+                    placeholder="Enter your username"
+                    autoComplete="username"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="auth-input-group">
+                <div className="auth-label-row">
+                  <label className="auth-field-label" htmlFor="auth-password">
+                    Password
+                  </label>
+                  <button
+                    type="button"
+                    className="auth-toggle-pwd-btn"
+                    onClick={() => setShowPassword(!showPassword)}
+                    tabIndex={-1}
+                  >
+                    {showPassword ? '🙈 Hide' : '👁️ Show'}
+                  </button>
+                </div>
+                <div className="auth-input-container">
+                  <span className="auth-input-icon">🔒</span>
+                  <input
+                    id="auth-password"
+                    type={showPassword ? 'text' : 'password'}
+                    className="auth-text-input"
+                    value={password}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setSelectedPreset('');
+                    }}
+                    placeholder="Enter your password"
+                    autoComplete="current-password"
+                    required
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="auth-primary-submit-btn"
+                disabled={loading}
+              >
+                {loading ? (
+                  <>
+                    <span className="auth-spinner" />
+                    <span>Verifying JWT Credentials...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Sign In to ANPR Platform</span>
+                    <span className="auth-btn-arrow">→</span>
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* ── Security & Compliance Footer ── */}
+            <div className="auth-security-notice">
+              <span className="auth-lock-micro">🔒</span>
+              <span>
+                <strong>Statutory Compliance Notice:</strong> All login events, plate lookups, and identity queries are permanently recorded in the immutable audit log.
+              </span>
+            </div>
+          </div>
+        ) : (
+          /* ── Role & Permissions Matrix View ── */
+          <div className="auth-matrix-view">
+            <div className="auth-matrix-intro">
+              The Delhi ANPR & Trajectory Tracking Platform enforces strict <strong>Role-Based Access Control (RBAC)</strong> to comply with statutory data privacy standards.
+            </div>
+
+            <div className="auth-matrix-table-card">
+              <table className="auth-matrix-grid">
+                <thead>
+                  <tr>
+                    <th>Capability Area</th>
+                    <th className="th-admin">👑 Admin</th>
+                    <th className="th-police">👮‍♂️ Traffic Police</th>
+                    <th className="th-planner">📊 City Planner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Vehicle Trajectory Reconstruction</div>
+                      <div className="cap-desc">Fuzzy plate search & trip timeline</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Private Citizen Identity Vault</div>
+                      <div className="cap-desc">Owner address, phone & vehicle registration</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-deny">Protected (403)</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Alert Center & Stolen Blacklist</div>
+                      <div className="cap-desc">Wanted vehicles & hotlist resolution</div>
+                    </td>
+                    <td><span className="badge-grant full">CRUD & Resolve</span></td>
+                    <td><span className="badge-grant full">Resolve Alerts</span></td>
+                    <td><span className="badge-deny">View Only / Blocked</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Live Traffic & Congestion Heatmap</div>
+                      <div className="cap-desc">Delhi NCR real-time node map</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Video Upload ANPR Lab</div>
+                      <div className="cap-desc">Multipart upload with &ge;10s OCR validation</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-deny">Blocked</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">City Traffic Analytics</div>
+                      <div className="cap-desc">Corridor speeds, peak hours, OD matrix</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <div className="cap-title">Statutory Audit Logs</div>
+                      <div className="cap-desc">Immutable officer activity & query tracking</div>
+                    </td>
+                    <td><span className="badge-grant full">Full Access</span></td>
+                    <td><span className="badge-deny">Blocked</span></td>
+                    <td><span className="badge-deny">Blocked</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="auth-matrix-back-bar">
+              <button 
+                type="button" 
+                className="btn btn-primary"
+                onClick={() => setActiveView('login')}
+              >
+                ← Back to Sign In
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

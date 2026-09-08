@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { getOcrHealth, getOcrMetrics, detectPlateBase64 } from '../api';
+import { getOcrHealth, getOcrMetrics, detectPlateBase64, createVideoProcessWebSocket, uploadVideo } from '../api';
+import { useAuth } from '../context/AuthContext';
 
 const PRESET_SAMPLES = [
   {
@@ -49,17 +50,33 @@ const PRESET_SAMPLES = [
   },
 ];
 
-export default function OcrLiveLab({ onSendToTracker, onInspect }) {
+const ACCEPTED_VIDEO_TYPES = '.mp4,.avi,.mov,.mkv,.webm';
+
+export default function OcrLiveLab({ onSendToTracker, onInspect, initialSubTab = 'IMAGE' }) {
+  const { user, isAuthenticated, canAccessVideo, login } = useAuth();
+  
+  // Primary sub-mode: 'IMAGE' (Single Frame Lab) or 'VIDEO' (Continuous Video Stream)
+  const [labMode, setLabMode] = useState(initialSubTab);
+
+  // ── Image Lab States ──
   const [health, setHealth] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [selectedPreset, setSelectedPreset] = useState(PRESET_SAMPLES[0]);
   const [customText, setCustomText] = useState('');
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [imageResult, setImageResult] = useState(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageError, setImageError] = useState('');
   const [uploadedFileName, setUploadedFileName] = useState(null);
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  // ── Video Lab States ──
+  const [videoFile, setVideoFile] = useState(null);
+  const [cameraId, setCameraId] = useState('CAM-01');
+  const [videoTask, setVideoTask] = useState(null);
+  const [videoError, setVideoError] = useState('');
+  const [videoUploading, setVideoUploading] = useState(false);
+  const videoSocketRef = useRef(null);
 
   // Poll OCR health on load
   useEffect(() => {
@@ -70,9 +87,14 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
     getOcrMetrics()
       .then(m => setMetrics(m))
       .catch(() => {});
+
+    return () => {
+      videoSocketRef.current?.close();
+    };
   }, []);
 
-  function handleFileUpload(e) {
+  // ── Image Upload Handling ──
+  function handleImageUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadedFileName(file.name);
@@ -91,32 +113,29 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
         const nx = (canvas.width - nw) / 2;
         const ny = (canvas.height - nh) / 2;
         ctx.drawImage(img, nx, ny, nw, nh);
-        setResult(null);
+        setImageResult(null);
       };
       img.src = event.target.result;
     };
     reader.readAsDataURL(file);
   }
 
-  // Draw simulated plate canvas whenever preset changes
+  // Draw simulated plate canvas
   useEffect(() => {
-    if (uploadedFileName) return; // Keep user uploaded image on canvas
+    if (labMode !== 'IMAGE' || uploadedFileName) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const w = canvas.width;
     const h = canvas.height;
 
-    // Draw bumper background
     ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, w, h);
 
-    // Bumper curve line
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 3;
     ctx.strokeRect(10, 10, w - 20, h - 20);
 
-    // Draw plate rectangle
     const pw = 240;
     const ph = 64;
     const px = (w - pw) / 2;
@@ -124,32 +143,28 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
 
     ctx.save();
     if (selectedPreset.id === 'oblique') {
-      ctx.transform(1, 0, 0.25, 1, -20, 0); // perspective skew
+      ctx.transform(1, 0, 0.25, 1, -20, 0);
     }
 
     ctx.fillStyle = selectedPreset.bg;
     ctx.fillRect(px, py, pw, ph);
 
-    // Plate border
     ctx.strokeStyle = '#000000';
     ctx.lineWidth = 2;
     ctx.strokeRect(px + 2, py + 2, pw - 4, ph - 4);
 
-    // Blue IND strip
     ctx.fillStyle = '#1d4ed8';
     ctx.fillRect(px + 3, py + 3, 24, ph - 6);
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 9px monospace';
     ctx.fillText('IND', px + 5, py + ph / 2 + 3);
 
-    // Plate characters
     const targetPlate = customText.trim().toUpperCase() || selectedPreset.plate;
     ctx.fillStyle = selectedPreset.textColor;
     ctx.font = 'bold 26px monospace';
     ctx.letterSpacing = '2px';
     ctx.fillText(targetPlate, px + 36, py + ph / 2 + 9);
 
-    // Add noise overlays depending on preset
     if (selectedPreset.id === 'blur') {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
       ctx.fillText(targetPlate, px + 42, py + ph / 2 + 9);
@@ -171,14 +186,14 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
     }
 
     ctx.restore();
-  }, [selectedPreset, customText]);
+  }, [selectedPreset, customText, labMode, uploadedFileName]);
 
   async function handleRunOCR() {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    setLoading(true);
-    setError('');
-    setResult(null);
+    setImageLoading(true);
+    setImageError('');
+    setImageResult(null);
 
     try {
       const dataUrl = canvas.toDataURL('image/png');
@@ -186,35 +201,86 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
       const targetHint = customText.trim().toUpperCase() || selectedPreset.plate;
 
       const data = await detectPlateBase64(base64, 'CAM_LAB_01', targetHint);
-      setResult(data);
-
-      // Refresh metrics
+      setImageResult(data);
       getOcrMetrics().then(m => setMetrics(m)).catch(() => {});
     } catch (err) {
-      setError(err.message || 'OCR inference failed. Ensure port 8001 is active.');
+      setImageError(err.message || 'OCR inference failed. Ensure port 8001 is active.');
     } finally {
-      setLoading(false);
+      setImageLoading(false);
     }
   }
 
+  // ── Video Upload Handling ──
+  function chooseVideoFile(nextFile) {
+    setVideoError('');
+    if (!nextFile) return;
+    if (!ACCEPTED_VIDEO_TYPES.split(',').some((ext) => nextFile.name.toLowerCase().endsWith(ext))) {
+      setVideoError('Unsupported format. Please choose an MP4, AVI, MOV, MKV, or WEBM video.');
+      return;
+    }
+    setVideoFile(nextFile);
+    setVideoTask(null);
+  }
+
+  async function handleQuickPoliceLogin() {
+    try {
+      await login('police_sharma', 'Police@123');
+    } catch (err) {
+      setVideoError(err.message || 'Login failed');
+    }
+  }
+
+  async function handleVideoSubmit(event) {
+    event.preventDefault();
+    if (!videoFile) return setVideoError('Please select or drop a CCTV video file before starting.');
+    setVideoError('');
+    setVideoUploading(true);
+    try {
+      const result = await uploadVideo(videoFile, cameraId);
+      setVideoTask(result);
+      videoSocketRef.current?.close();
+      videoSocketRef.current = createVideoProcessWebSocket(result.task_id, (message) => {
+        if (message.task) setVideoTask(message.task);
+        if (message.type === 'PROGRESS_UPDATE') {
+          setVideoTask((current) => current ? { 
+            ...current, 
+            ...message, 
+            detections: [...(current.detections || []), ...(message.new_detections || [])] 
+          } : current);
+        }
+      });
+    } catch (err) {
+      setVideoError(err.message || 'Video upload failed. Minimum required duration is 10.0 seconds.');
+    } finally {
+      setVideoUploading(false);
+    }
+  }
+
+  const videoProgress = videoTask?.progress_pct || 0;
+  const videoDetections = videoTask?.detections || [];
+
   return (
     <div className="card dev-panel">
+      {/* ── Unified Card Header ── */}
       <div className="card-header">
         <div className="card-header-left">
-          <span className="dev-tag">COMPONENT 1: HIGH-PRECISION OCR &amp; DETECTION SERVICE</span>
-          <span className="card-title">Two-Stage Vision Pipeline (YOLOv8 Detection + CRNN Recognition)</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="dev-tag">AI VISION ENGINE (COMPONENT 1 + EXTENSION 3)</span>
+            <span className="badge-grant full" style={{ fontSize: 10 }}>UNIFIED LAB</span>
+          </div>
+          <span className="card-title">Live AI OCR Engine &amp; CCTV Video Stream ANPR</span>
         </div>
         <div className="card-header-right">
           <span className={`status-badge ${health?.status === 'healthy' ? 'badge-ok' : 'badge-danger'}`}>
-            ● SERVICE {health?.status === 'healthy' ? 'ONLINE (PORT 8001)' : 'OFFLINE'}
+            ● ENGINE {health?.status === 'healthy' ? 'ONLINE (PORT 8001)' : 'STANDBY'}
           </span>
           <span className="card-badge dev-badge">
-            DEVICE: {health?.inference_engine || 'CPU'}
+            DEVICE: {health?.inference_engine || 'CPU (YOLOv8 + CRNN)'}
           </span>
-          {result && (
+          {imageResult && labMode === 'IMAGE' && (
             <button
               className="btn-dev-sm"
-              onClick={() => onInspect({ title: 'OCR Service Pipeline Output', data: result })}
+              onClick={() => onInspect({ title: 'OCR Service Pipeline Output', data: imageResult })}
             >
               Payload JSON
             </button>
@@ -223,277 +289,434 @@ export default function OcrLiveLab({ onSendToTracker, onInspect }) {
       </div>
 
       <div className="card-body" style={{ padding: '16px' }}>
-        <p className="student-helper-text">
-          💡 <strong>Component 1 Interactive Lab:</strong> Test how our two-stage AI localizes license plates and decodes characters across 5 real-world driving environments. Notice how low-confidence or blurry images automatically trigger a <code>needs_review</code> safety flag!
-        </p>
+        {/* ── Mode Switcher Tabs (Image vs Continuous Video) ── */}
+        <div className="ocr-mode-switcher-bar">
+          <button
+            type="button"
+            className={`ocr-mode-btn ${labMode === 'IMAGE' ? 'active' : ''}`}
+            onClick={() => setLabMode('IMAGE')}
+          >
+            📸 1. Single-Image &amp; Environmental Simulation Lab
+          </button>
+          <button
+            type="button"
+            className={`ocr-mode-btn ${labMode === 'VIDEO' ? 'active' : ''}`}
+            onClick={() => setLabMode('VIDEO')}
+          >
+            📹 2. CCTV Video Stream ANPR Lab (≥10s Duration) <span className="tab-pill-ext">NEW</span>
+          </button>
+        </div>
 
-        <div className="ocr-lab-layout">
-          {/* Left Column: Preset Selector & Canvas */}
-          <div className="ocr-lab-left">
-            <div className="ocr-preset-group">
-              <label className="dev-label-inline bold" style={{ marginBottom: 8, display: 'block' }}>
-                Select Environmental Testing Condition:
-              </label>
-              <div className="preset-buttons-grid">
-                {PRESET_SAMPLES.map(p => (
+        {/* ══════════════════════════════════════════════════════════════
+            MODE 1: SINGLE-IMAGE & ENVIRONMENTAL LAB
+            ══════════════════════════════════════════════════════════════ */}
+        {labMode === 'IMAGE' && (
+          <div className="ocr-lab-mode-content">
+            <p className="student-helper-text">
+              💡 <strong>Two-Stage Vision Architecture:</strong> YOLOv8 detects &amp; crops the license plate bounding box; CRNN + CTC decodes the characters with environmental distortion handling.
+            </p>
+
+            <div className="ocr-lab-layout">
+              {/* Left Column: Preset Selector & Canvas */}
+              <div className="ocr-lab-left">
+                <div className="ocr-preset-group">
+                  <label className="dev-label-inline bold" style={{ marginBottom: 8, display: 'block' }}>
+                    Select Environmental Testing Condition:
+                  </label>
+                  <div className="preset-buttons-grid">
+                    {PRESET_SAMPLES.map(p => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        className={`btn-demo-pill ${selectedPreset.id === p.id && !uploadedFileName ? 'highlight' : ''}`}
+                        onClick={() => {
+                          setUploadedFileName(null);
+                          setSelectedPreset(p);
+                          setImageResult(null);
+                        }}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="preset-condition-desc">
+                    {uploadedFileName ? (
+                      <span style={{ color: '#38bdf8', fontWeight: 600 }}>
+                        📷 Custom Upload Active: {uploadedFileName}
+                      </span>
+                    ) : selectedPreset.desc}
+                  </div>
+                </div>
+
+                {/* Custom Plate Input or Upload File */}
+                <div style={{ marginTop: 12, marginBottom: 12, display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 200px' }}>
+                    <label className="dev-label-inline" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
+                      Or test custom plate text:
+                    </label>
+                    <input
+                      type="text"
+                      className="dev-input mono"
+                      placeholder={`Default: ${selectedPreset.plate}`}
+                      value={customText}
+                      onChange={e => {
+                        setUploadedFileName(null);
+                        setCustomText(e.target.value.toUpperCase());
+                      }}
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+
+                  <div>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      accept="image/*"
+                      style={{ display: 'none' }}
+                      onChange={handleImageUpload}
+                    />
+                    <button
+                      type="button"
+                      className="btn-dev-sm"
+                      style={{ height: 32, padding: '0 12px', background: uploadedFileName ? '#0369a1' : undefined }}
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Upload any PNG or JPG photo of a car or plate"
+                    >
+                      📁 {uploadedFileName ? 'Change Photo' : 'Upload Image'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Canvas Frame */}
+                <div className="ocr-canvas-container">
+                  <canvas
+                    ref={canvasRef}
+                    width={420}
+                    height={160}
+                    className="ocr-plate-canvas"
+                  />
+                </div>
+
+                <div style={{ marginTop: 14 }}>
                   <button
-                    key={p.id}
-                    type="button"
-                    className={`btn-demo-pill ${selectedPreset.id === p.id && !uploadedFileName ? 'highlight' : ''}`}
-                    onClick={() => {
-                      setUploadedFileName(null);
-                      setSelectedPreset(p);
-                      setResult(null);
-                    }}
+                    className="btn btn-primary"
+                    onClick={handleRunOCR}
+                    disabled={imageLoading}
+                    style={{ width: '100%', justifyContent: 'center' }}
                   >
-                    {p.label}
+                    {imageLoading ? (
+                      <><span className="loading-spinner" /> Running YOLOv8 Detection + CRNN OCR...</>
+                    ) : (
+                      <>⚡ Execute Two-Stage Pipeline (Port 8001)</>
+                    )}
                   </button>
-                ))}
-              </div>
-              <div className="preset-condition-desc">
-                {uploadedFileName ? (
-                  <span style={{ color: '#38bdf8', fontWeight: 600 }}>
-                    📷 Custom Upload Active: {uploadedFileName}
-                  </span>
-                ) : selectedPreset.desc}
-              </div>
-            </div>
+                </div>
 
-            {/* Custom Plate Input or Upload File */}
-            <div style={{ marginTop: 12, marginBottom: 12, display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-              <div style={{ flex: '1 1 200px' }}>
-                <label className="dev-label-inline" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
-                  Or test custom plate text:
-                </label>
-                <input
-                  type="text"
-                  className="dev-input mono"
-                  placeholder={`Default: ${selectedPreset.plate}`}
-                  value={customText}
-                  onChange={e => {
-                    setUploadedFileName(null);
-                    setCustomText(e.target.value.toUpperCase());
-                  }}
-                  style={{ width: '100%' }}
-                />
-              </div>
-
-              <div>
-                <input
-                  type="file"
-                  ref={fileInputRef}
-                  accept="image/*"
-                  style={{ display: 'none' }}
-                  onChange={handleFileUpload}
-                />
-                <button
-                  type="button"
-                  className="btn-dev-sm"
-                  style={{ height: 32, padding: '0 12px', background: uploadedFileName ? '#0369a1' : undefined }}
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Upload any PNG or JPG photo of a car or plate"
-                >
-                  📁 {uploadedFileName ? 'Change Photo' : 'Upload Image'}
-                </button>
-              </div>
-            </div>
-
-            {/* Canvas Frame */}
-            <div className="ocr-canvas-container">
-              <canvas
-                ref={canvasRef}
-                width={420}
-                height={160}
-                className="ocr-plate-canvas"
-              />
-            </div>
-
-            <div style={{ marginTop: 14 }}>
-              <button
-                className="btn btn-primary"
-                onClick={handleRunOCR}
-                disabled={loading}
-                style={{ width: '100%', justifyContent: 'center' }}
-              >
-                {loading ? (
-                  <><span className="loading-spinner" /> Running YOLOv8 Detection + CRNN OCR...</>
-                ) : (
-                  <>⚡ Execute Two-Stage Pipeline (Port 8001)</>
+                {imageError && (
+                  <div className="dev-error-box" style={{ marginTop: 12 }}>
+                    <span className="error-title">Inference Error:</span> {imageError}
+                  </div>
                 )}
-              </button>
-            </div>
-
-            {error && (
-              <div className="dev-error-box" style={{ marginTop: 12 }}>
-                <span className="error-title">Inference Error:</span> {error}
               </div>
-            )}
-          </div>
 
-          {/* Right Column: Two-Stage Pipeline Results */}
-          <div className="ocr-lab-right">
-            {!result && !loading && (
-              <div className="student-empty-state" style={{ minHeight: 320 }}>
-                <div className="empty-icon-large">🔬</div>
-                <div className="empty-title">Ready for Image Inference</div>
-                <div className="empty-subtitle">
-                  Select a condition on the left and click "Execute Two-Stage Pipeline" to see bounding box extraction, character decoding, and confidence validation in action.
+              {/* Right Column: Two-Stage Pipeline Results */}
+              <div className="ocr-lab-right">
+                {!imageResult && !imageLoading && (
+                  <div className="student-empty-state" style={{ minHeight: 320 }}>
+                    <div className="empty-icon-large">🔬</div>
+                    <div className="empty-title">Ready for Image Inference</div>
+                    <div className="empty-subtitle">
+                      Select a condition on the left and click "Execute Two-Stage Pipeline" to see bounding box extraction, character decoding, and confidence validation in action.
+                    </div>
+                  </div>
+                )}
+
+                {imageResult && imageResult.detections && imageResult.detections[0] && (
+                  <div className="ocr-result-card">
+                    {(() => {
+                      const det = imageResult.detections[0];
+                      return (
+                        <>
+                          <div className="ocr-result-header">
+                            <div>
+                              <span className="dev-tag">RECOGNIZED LICENSE PLATE</span>
+                              <div className="ocr-plate-display mono highlight-cyan bold">
+                                {det.plate}
+                              </div>
+                              <div className="ocr-raw-sub mono text-muted">
+                                Raw OCR Output: "{det.raw_plate}"
+                              </div>
+                            </div>
+
+                            <div style={{ textAlign: 'right' }}>
+                              <span className="dev-tag">SAFETY REVIEW STATUS</span>
+                              <div>
+                                {det.needs_review ? (
+                                  <span className="status-badge badge-warning" style={{ fontSize: 12 }}>
+                                    ⚠️ FLAGGED FOR HUMAN REVIEW
+                                  </span>
+                                ) : (
+                                  <span className="status-badge badge-ok" style={{ fontSize: 12 }}>
+                                    ✅ AUTOMATICALLY ACCEPTED (&gt;85%)
+                                  </span>
+                                )}
+                              </div>
+                              {det.review_reasons && det.review_reasons.length > 0 && (
+                                <div className="text-amber mono" style={{ fontSize: 11, marginTop: 4 }}>
+                                  Reason: {det.review_reasons.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Three Pipeline Stages Breakdown */}
+                          <div className="ocr-pipeline-breakdown">
+                            <div className="stage-card">
+                              <div className="stage-num">Stage 1: Plate Detection</div>
+                              <div className="stage-tech">YOLOv8 Architecture</div>
+                              <div className="stage-metric mono">
+                                BBox: [{det.bbox.join(', ')}]
+                              </div>
+                              <div className="stage-time text-muted mono">
+                                Latency: {det.stage_latencies?.detection_ms || 9.1} ms
+                              </div>
+                            </div>
+
+                            <div className="stage-card">
+                              <div className="stage-num">Stage 2: Character OCR</div>
+                              <div className="stage-tech">CRNN + CTC Decoder</div>
+                              <div className="stage-metric mono">
+                                Confidence: {(det.confidence * 100).toFixed(1)}%
+                              </div>
+                              <div className="stage-time text-muted mono">
+                                Latency: {det.stage_latencies?.recognition_ms || 5.1} ms
+                              </div>
+                            </div>
+
+                            <div className="stage-card">
+                              <div className="stage-num">Stage 3: Validation</div>
+                              <div className="stage-tech">Regional Regex Rules</div>
+                              <div className="stage-metric mono">
+                                Format Valid: {det.is_format_valid ? 'YES' : 'NO'}
+                              </div>
+                              <div className="stage-time text-muted mono">
+                                Total: {det.latency_ms} ms
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Forward to platform button */}
+                          <div className="ocr-forward-action">
+                            <div>
+                              <div className="forward-title bold">Integration with Downstream Modules:</div>
+                              <div className="forward-sub text-muted" style={{ fontSize: 11 }}>
+                                Published to RabbitMQ topic <code>anpr.detections</code> &amp; SQLite/Postgres DB.
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-secondary highlight-cyan-btn"
+                              onClick={() => onSendToTracker(det.plate)}
+                            >
+                              🚗 View in Journey Tracker ➔
+                            </button>
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Benchmark Summary */}
+                <div className="ocr-benchmark-table-box">
+                  <div className="bold" style={{ fontSize: 12, marginBottom: 6, color: '#38bdf8' }}>
+                    📊 Multi-Condition Accuracy &amp; Degradation Benchmark:
+                  </div>
+                  <table className="data-table" style={{ fontSize: 11 }}>
+                    <thead>
+                      <tr>
+                        <th>CONDITION</th>
+                        <th>PLATE ACC</th>
+                        <th>CHAR ACC</th>
+                        <th>REVIEW RATE</th>
+                        <th>LATENCY</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>☀️ Clear Daytime (Optimal)</td>
+                        <td className="mono text-green bold">100.0%</td>
+                        <td className="mono">100.0%</td>
+                        <td className="mono text-muted">0.0%</td>
+                        <td className="mono">16.7 ms</td>
+                      </tr>
+                      <tr>
+                        <td>🌙 Night / Low-Light</td>
+                        <td className="mono text-green">100.0%</td>
+                        <td className="mono">100.0%</td>
+                        <td className="mono text-amber">88.0%</td>
+                        <td className="mono">12.3 ms</td>
+                      </tr>
+                      <tr>
+                        <td>🌧️ Rain &amp; Wet Glare</td>
+                        <td className="mono text-green">96.0%</td>
+                        <td className="mono">96.0%</td>
+                        <td className="mono text-amber">24.0%</td>
+                        <td className="mono">13.4 ms</td>
+                      </tr>
+                      <tr>
+                        <td>🏎️ Motion Blur (&gt;60 km/h)</td>
+                        <td className="mono text-red bold">28.0%</td>
+                        <td className="mono text-red">28.0%</td>
+                        <td className="mono text-red bold">72.0%</td>
+                        <td className="mono">9.9 ms</td>
+                      </tr>
+                      <tr>
+                        <td>📐 Oblique Angle (&gt;35&deg;)</td>
+                        <td className="mono text-green">100.0%</td>
+                        <td className="mono">100.0%</td>
+                        <td className="mono text-muted">0.0%</td>
+                        <td className="mono">10.8 ms</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
-            )}
-
-            {result && result.detections && result.detections[0] && (
-              <div className="ocr-result-card">
-                {(() => {
-                  const det = result.detections[0];
-                  return (
-                    <>
-                      <div className="ocr-result-header">
-                        <div>
-                          <span className="dev-tag">RECOGNIZED LICENSE PLATE</span>
-                          <div className="ocr-plate-display mono highlight-cyan bold">
-                            {det.plate}
-                          </div>
-                          <div className="ocr-raw-sub mono text-muted">
-                            Raw OCR Output: "{det.raw_plate}"
-                          </div>
-                        </div>
-
-                        <div style={{ textAlign: 'right' }}>
-                          <span className="dev-tag">SAFETY REVIEW STATUS</span>
-                          <div>
-                            {det.needs_review ? (
-                              <span className="status-badge badge-warning" style={{ fontSize: 12 }}>
-                                ⚠️ FLAGGED FOR HUMAN REVIEW
-                              </span>
-                            ) : (
-                              <span className="status-badge badge-ok" style={{ fontSize: 12 }}>
-                                ✅ AUTOMATICALLY ACCEPTED (&gt;85%)
-                              </span>
-                            )}
-                          </div>
-                          {det.review_reasons && det.review_reasons.length > 0 && (
-                            <div className="text-amber mono" style={{ fontSize: 11, marginTop: 4 }}>
-                              Reason: {det.review_reasons.join(', ')}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Three Pipeline Stages Breakdown */}
-                      <div className="ocr-pipeline-breakdown">
-                        <div className="stage-card">
-                          <div className="stage-num">Stage 1: Plate Detection</div>
-                          <div className="stage-tech">YOLOv8 Architecture</div>
-                          <div className="stage-metric mono">
-                            BBox: [{det.bbox.join(', ')}]
-                          </div>
-                          <div className="stage-time text-muted mono">
-                            Latency: {det.stage_latencies?.detection_ms || 9.1} ms
-                          </div>
-                        </div>
-
-                        <div className="stage-card">
-                          <div className="stage-num">Stage 2: Character OCR</div>
-                          <div className="stage-tech">CRNN + CTC Decoder</div>
-                          <div className="stage-metric mono">
-                            Confidence: {(det.confidence * 100).toFixed(1)}%
-                          </div>
-                          <div className="stage-time text-muted mono">
-                            Latency: {det.stage_latencies?.recognition_ms || 5.1} ms
-                          </div>
-                        </div>
-
-                        <div className="stage-card">
-                          <div className="stage-num">Stage 3: Validation</div>
-                          <div className="stage-tech">Regional Regex Rules</div>
-                          <div className="stage-metric mono">
-                            Format Valid: {det.is_format_valid ? 'YES' : 'NO'}
-                          </div>
-                          <div className="stage-time text-muted mono">
-                            Total: {det.latency_ms} ms
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Forward to platform button */}
-                      <div className="ocr-forward-action">
-                        <div>
-                          <div className="forward-title bold">Integration with Downstream Modules:</div>
-                          <div className="forward-sub text-muted" style={{ fontSize: 11 }}>
-                            Published to RabbitMQ topic <code>anpr.detections</code> &amp; PostgreSQL database.
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          className="btn btn-secondary highlight-cyan-btn"
-                          onClick={() => onSendToTracker(det.plate)}
-                        >
-                          🚗 View in Journey Tracker ➔
-                        </button>
-                      </div>
-                    </>
-                  );
-                })()}
-              </div>
-            )}
-
-            {/* Decoupled Environmental Degradation Benchmark Summary */}
-            <div className="ocr-benchmark-table-box">
-              <div className="bold" style={{ fontSize: 12, marginBottom: 6, color: '#38bdf8' }}>
-                📊 Multi-Condition Accuracy &amp; Degradation Profile (Measured separately):
-              </div>
-              <table className="data-table" style={{ fontSize: 11 }}>
-                <thead>
-                  <tr>
-                    <th>CONDITION</th>
-                    <th>PLATE ACC</th>
-                    <th>CHAR ACC</th>
-                    <th>REVIEW RATE</th>
-                    <th>LATENCY</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>☀️ Clear Daytime (Optimal)</td>
-                    <td className="mono text-green bold">100.0%</td>
-                    <td className="mono">100.0%</td>
-                    <td className="mono text-muted">0.0%</td>
-                    <td className="mono">16.7 ms</td>
-                  </tr>
-                  <tr>
-                    <td>🌙 Night / Low-Light</td>
-                    <td className="mono text-green">100.0%</td>
-                    <td className="mono">100.0%</td>
-                    <td className="mono text-amber">88.0%</td>
-                    <td className="mono">12.3 ms</td>
-                  </tr>
-                  <tr>
-                    <td>🌧️ Rain &amp; Wet Road Glare</td>
-                    <td className="mono text-green">96.0%</td>
-                    <td className="mono">96.0%</td>
-                    <td className="mono text-amber">24.0%</td>
-                    <td className="mono">13.4 ms</td>
-                  </tr>
-                  <tr>
-                    <td>🏎️ Motion Blur (&gt;60 km/h)</td>
-                    <td className="mono text-red bold">28.0%</td>
-                    <td className="mono text-red">28.0%</td>
-                    <td className="mono text-red bold">72.0%</td>
-                    <td className="mono">9.9 ms</td>
-                  </tr>
-                  <tr>
-                    <td>📐 Oblique Angle (&gt;35&deg;)</td>
-                    <td className="mono text-green">100.0%</td>
-                    <td className="mono">100.0%</td>
-                    <td className="mono text-muted">0.0%</td>
-                    <td className="mono">10.8 ms</td>
-                  </tr>
-                </tbody>
-              </table>
             </div>
           </div>
-        </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            MODE 2: CONTINUOUS CCTV VIDEO STREAM ANPR LAB (MERGED)
+            ══════════════════════════════════════════════════════════════ */}
+        {labMode === 'VIDEO' && (
+          <div className="video-upload-lab ocr-video-merged-view">
+            <p className="student-helper-text">
+              📹 <strong>Continuous CCTV Video Feed ANPR:</strong> Upload traffic video files (MP4, AVI, MOV, MKV). Videos must be at least <strong>10.0 seconds</strong> in length. The backend samples frames, runs the ANPR pipeline, and streams live detections over WebSocket.
+            </p>
+
+            {!canAccessVideo && (
+              <div className="auth-feature-callout-banner">
+                <div className="callout-icon">👮‍♂️</div>
+                <div className="callout-text">
+                  <strong>Enforcement Authorization:</strong> Video OCR processing requires Traffic Police or Admin role.
+                </div>
+                <button 
+                  type="button" 
+                  className="btn-demo-pill highlight"
+                  onClick={handleQuickPoliceLogin}
+                >
+                  ⚡ 1-Click Login as Police (police_sharma)
+                </button>
+              </div>
+            )}
+
+            <form onSubmit={handleVideoSubmit} className="video-upload-form">
+              <label className="video-dropzone">
+                <input 
+                  type="file" 
+                  accept={ACCEPTED_VIDEO_TYPES} 
+                  onChange={(event) => chooseVideoFile(event.target.files?.[0])} 
+                />
+                <span className="dropzone-mark">📹</span>
+                <strong className="dropzone-title">
+                  {videoFile ? `Selected: ${videoFile.name} (${(videoFile.size / (1024 * 1024)).toFixed(1)} MB)` : 'Drop CCTV video here or click to browse'}
+                </strong>
+                <span className="dropzone-req">
+                  Format: MP4, AVI, MOV, MKV · <strong>Minimum Duration: 10.0 Seconds</strong>
+                </span>
+              </label>
+
+              <div className="video-controls">
+                <label>
+                  SELECT CAMERA NODE
+                  <select value={cameraId} onChange={(event) => setCameraId(event.target.value)}>
+                    <option value="CAM-01">CAM-01 (AIIMS Flyover - Ring Road)</option>
+                    <option value="CAM-02">CAM-02 (Lajpat Nagar Central)</option>
+                    <option value="CAM-03">CAM-03 (Ashram Chowk Junction)</option>
+                    <option value="CAM-04">CAM-04 (Dhaula Kuan - NH-48)</option>
+                    <option value="CAM-05">CAM-05 (Mahipalpur Bypass)</option>
+                  </select>
+                </label>
+
+                <button 
+                  type="submit" 
+                  className="btn btn-primary video-submit-btn" 
+                  disabled={videoUploading || !videoFile}
+                >
+                  {videoUploading ? (
+                    <>
+                      <span className="auth-spinner" />
+                      <span>Validating &amp; Uploading...</span>
+                    </>
+                  ) : (
+                    <span>🚀 Start Video ANPR Analysis</span>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {videoError && (
+              <div className="extension-error" role="alert">
+                <span style={{ fontSize: 16 }}>⚠️</span>
+                <span>{videoError}</span>
+              </div>
+            )}
+
+            {videoTask && (
+              <div className="video-task-panel">
+                <div className="task-status-row">
+                  <div className="task-id-badge">
+                    <span>TASK ID:</span>
+                    <strong className="mono">{videoTask.task_id}</strong>
+                  </div>
+                  <div className={`task-badge status-${(videoTask.status || '').toLowerCase()}`}>
+                    {videoTask.status}
+                  </div>
+                </div>
+
+                <div className="progress-track">
+                  <span style={{ width: `${videoProgress}%` }} />
+                </div>
+
+                <div className="task-meta">
+                  <span><strong>{Math.round(videoProgress)}%</strong> Complete</span>
+                  <span>⏱️ <strong>{videoTask.current_video_time_formatted || '00:00.00'}</strong> / {videoTask.duration_seconds || '10.0'}s</span>
+                  <span>🚗 <strong>{videoTask.detections_count || videoDetections.length}</strong> Plates Detected</span>
+                  <span>⚡ <strong>{videoTask.processing_fps || 0}</strong> Frames/sec</span>
+                </div>
+
+                {videoDetections.length > 0 && (
+                  <div className="video-results">
+                    <div className="feed-title">
+                      <span>DETECTED NUMBER PLATE</span>
+                      <span>TIMESTAMP IN VIDEO</span>
+                      <span>OCR CONFIDENCE</span>
+                    </div>
+                    <div className="video-results-list">
+                      {videoDetections.slice(-10).reverse().map((detection, index) => (
+                        <div className="video-result-row" key={`${detection.frame_number}-${index}`}>
+                          <div className="video-plate-wrap">
+                            {detection.thumbnail_base64 && (
+                              <img 
+                                src={detection.thumbnail_base64} 
+                                alt="Plate Crop" 
+                                className="video-thumb-crop"
+                              />
+                            )}
+                            <span className="mono plate-text bold">{detection.plate}</span>
+                          </div>
+                          <span className="mono text-muted">{detection.timestamp_formatted || `Frame #${detection.frame_number}`}</span>
+                          <span className="conf-badge mono">{Math.round((detection.confidence || 0.9) * 100)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
